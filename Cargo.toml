@@ -1,0 +1,14 @@
+[package]
+name = "fs-sync"
+version = "0.1.0"
+authors = ["David Barsky <me@davidbarsky.com>"]
+
+[dependencies]
+notify = "4.0.0"
+loggerv = "0.4"
+log = "0.3"
+glob = "0.2"
+clippy = {version = "*", optional = true}
+
+[features]
+default = []
