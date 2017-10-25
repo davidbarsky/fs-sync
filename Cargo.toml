@@ -7,7 +7,10 @@ authors = ["David Barsky <me@davidbarsky.com>"]
 notify = "4.0.0"
 loggerv = "0.4"
 log = "0.3"
-glob = "0.2"
+error-chain = "0.11.0"
+structopt = "0.1.0"
+structopt-derive = "0.1.0"
+ssh2 = "0.3"
 clippy = {version = "*", optional = true}
 
 [features]
