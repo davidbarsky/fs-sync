@@ -7,57 +7,82 @@ extern crate error_chain;
 extern crate log;
 extern crate loggerv;
 extern crate notify;
+extern crate ssh2;
+extern crate structopt;
+#[macro_use]
+extern crate structopt_derive;
 
+use structopt::StructOpt;
 use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
-use std::fs::File;
 use log::LogLevel;
+use ssh2::Session;
+use std::path::Path;
 
 mod errors {
     // Create the Error, ErrorKind, ResultExt, and Result types
-    error_chain!{}
+    error_chain!{
+        foreign_links {
+            Log(::log::SetLoggerError);
+            Notify(::notify::Error);
+        }
+    }
 }
-
 use errors::*;
 
+mod cli {
+    #[derive(StructOpt, Debug)]
+    #[structopt(name = "fs-sync", about = "An example of fs-sync usage.")]
+    pub struct Opts {
+        /// The file or directory that fs-watch should observe.
+        #[structopt(help = "Path to observe")]
+        pub source_path: String,
+
+        /// The ssh destination
+        #[structopt(help = "Host to sync to")]
+        pub ssh_destination: String,
+
+        /// The directory that fs-watch should dump to.
+        #[structopt(help = "Path that should be sycned to")]
+        pub destination_path: String,
+    }
+}
+
 quick_main!(|| -> Result<()> {
-    try!(loggerv::init_with_level(LogLevel::Info));
+    use cli::Opts;
+    let args: Opts = Opts::from_args();
+    let path = Path::new(args.source_path.as_str());
+    println!("{:?}", args);
+    println!("{:?}", path);
+
+    loggerv::init_with_level(LogLevel::Info)?;
     info!("Hi! Starting fs-sync...");
+    connect()?;
 
-    if let Err(ref e) = run() {
+    if let Err(ref e) = watch(path) {
+        println!("{:?}", path);
         error!("error: {:?}", e);
-
-        if let Some(backtrace) = e.backtrace() {
-           println!("backtrace: {:?}", backtrace);
-        }
+        panic!();
     }
     Ok(())
 });
 
-fn run() -> Result<()> {
-    use std::fs::File;
-
-    // This operation will fail
-    File::open("contacts")
-        .chain_err(|| "unable to open contacts file")?;
-
-    Ok(())
+fn connect() -> Result<Session> {
+    let sess = Session::new().unwrap();
+    let f = |s: &Session| {
+        let mut agent = s.agent().unwrap();
+        agent.connect().unwrap();
+        println!("Agent Identities: {:?}", agent.list_identities().unwrap());
+    };
+    f(&sess);
+    Ok(sess)
 }
 
-error_chain! {
-    foreign_links {
-        Log(::log::SetLoggerError);
-    }
-}
-
-fn watch() -> notify::Result<()> {
+fn watch(path: &Path) -> Result<()> {
     let (tx, rx) = channel();
 
-    let mut watcher: RecommendedWatcher = try!(raw_watcher(tx));
-    try!(watcher.watch(
-        "/Users/David/Developer/Rust/fs-sync",
-        RecursiveMode::Recursive
-    ));
+    let mut watcher: RecommendedWatcher = raw_watcher(tx)?;
+    watcher.watch(path, RecursiveMode::Recursive)?;
 
     loop {
         let event = rx.recv()
