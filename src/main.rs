@@ -1,5 +1,6 @@
 #![cfg_attr(feature = "clippy", feature(plugin))]
 #![cfg_attr(feature = "clippy", plugin(clippy))]
+#![feature(type_ascription)]
 
 #[macro_use]
 extern crate error_chain;
@@ -13,7 +14,7 @@ extern crate structopt;
 extern crate structopt_derive;
 
 use structopt::StructOpt;
-use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{raw_watcher, Op, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
 use std::sync::mpsc::channel;
 use log::LogLevel;
 use ssh2::Session;
@@ -97,11 +98,24 @@ fn handle_event(event: Result<RawEvent>) {
             path: Some(path),
             op: Ok(op),
             cookie,
-        }) => {
-            println!("{:?}", path.components());
-            info!("Operation: {:?} \n Path: {:?} \n ({:?})", op, path, cookie);
-        }
+        }) => if !is_git_directory(&path) {
+            if !is_target_directory(&path) {
+                info!("Operation: {:?} \n Path: {:?} \n ({:?})", op, path, cookie);
+            }
+        },
         Ok(event) => info!("broken event: {:?}", event),
         Err(e) => info!("watch error: {:?}", e),
     }
+}
+
+use std::path::Component;
+
+fn is_git_directory(path: &Path) -> bool {
+    path.components()
+        .any(|c: Component| c == Component::Normal(".git".as_ref()))
+}
+
+fn is_target_directory(path: &Path) -> bool {
+    path.components()
+        .any(|c: Component| c == Component::Normal("target".as_ref()))
 }
