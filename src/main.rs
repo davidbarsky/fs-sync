@@ -1,11 +1,7 @@
 #![cfg_attr(feature = "clippy", plugin(clippy))]
-#![feature(type_ascription)]
-#![feature(try_trait)]
-#![feature(plugin)]
-#![cfg_attr(test, feature(plugin))]
-#![cfg_attr(test, plugin(quickcheck_macros))]
+#![recursion_limit="1024"]
 
-
+extern crate difference;
 #[macro_use]
 extern crate error_chain;
 #[macro_use]
@@ -16,9 +12,7 @@ extern crate ssh2;
 extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
-
-#[cfg(test)]
-extern crate quickcheck;
+extern crate walkdir;
 
 use structopt::StructOpt;
 use log::LogLevel;
@@ -33,144 +27,183 @@ mod errors {
             Notify(::notify::Error);
             Ssh(::ssh2::Error);
             Tcp(::std::io::Error);
+            Env(::std::env::VarError);
+            WalkDir(::walkdir::Error);
+        }
+
+        errors {
+            EnviromentRead(env_variable: String) {
+                description("Failed to read enviroment variable")
+                display("Unable to read enviroment variable `{}`", env_variable)
+            }
+
+            HostConnection(host: String) {
+                description("Failed to connect to host")
+                display("Unable to connect to host `{}`", host)
+            }
+
+            UserAuthentication(user: String, host: String) {
+                description("Failed to authenticate user with host")
+                display("Unable to authenticate user `{}` with host `{}`", user, host)
+            }
+
+            Mkdir(path: String) {
+                description("Failed to authenticate create directory")
+                display("Unable to create directory `{}`", path)
+            }
+
+            DirectoryExists(path: String) {
+                description("Failed to create directory")
+                display("Directory `{}` already exists", path)
+            }
+
+            IsDirectory(path: String) {
+                description("Failed to read file")
+                display("Path `{}` is a directory", path)
+            }
+
+            LStat(path: String) {
+                description("Failed to run lstat")
+                display("Unable to run lstat on path `{}`", path)
+            }
+
+            InvalidUTF8(path: String) {
+                description("Stream did not contain valid UTF-8")
+                display("Unable to get a UTF-8 stream for `{}`", path)
+            }
         }
     }
 }
 use errors::*;
 
-mod cli {
+pub mod cli {
     #[derive(StructOpt, Debug)]
     #[structopt(name = "fs-sync", about = "An example of fs-sync usage.")]
     pub struct Opts {
         /// The file or directory that fs-watch should observe.
         #[structopt(help = "Path to observe")]
-        pub source_path: String,
+        pub local_path: String,
 
-        /// The ssh destination
+        /// The ssh host/destination
         #[structopt(help = "Host to sync to")]
         pub host: String,
 
-        /// The directory that fs-watch should dump to.
-        #[structopt(help = "Path that should be sycned to")]
-        pub destination_path: String,
+        /// The directory that fs-watch should write to.
+        #[structopt(help = "Path that fs-watch should write to.")]
+        pub host_path: String,
+
+        /// The port that Opts::host should connect to.
+        #[structopt(short = "-p", long = "port", help = "Port on host to connect to")]
+        pub port: Option<i64>,
     }
 }
 
-quick_main!(|| -> Result<()> {
-    let args: Opts = Opts::from_args();
-    let path = Path::new(args.source_path.as_str());
+fn main() {
+    if let Err(e) = run() {
+        error!("{}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
+    let args = Opts::from_args();
+    let path = Path::new(&args.local_path);
     loggerv::init_with_level(LogLevel::Info)?;
 
-    let host = "localhost:22";
-    info!("Starting fs-sync...");
-    info!("Connecting to host {:?}", host);
-    remote::test(host)?;
+    info!("Starting fs-sync");
+    info!("Reading files in {}", args.local_path);
+    let files = local::read_files_in_dir(&args.local_path)?;
+    info!("{:?}", files.len());
 
-    info!("Starting to watch {:?}...", path.display());
-    if let Err(ref e) = listener::watch(path) {
-        info!("{:?}", path);
+    info!("Connecting to host {:?}", args.host);
+    let formatted_host = local::format_host_string(&args.host, args.port);
+    let user = local::read_env("USER")?;
+    let connection = remote::authenticate_with_agent(&formatted_host, &user)?;
+
+    info!("Attempting to create directory {:?}", args.host_path);
+    match connection.mkdir(&args.host_path) {
+        Ok(_) => info!("Created directory {:?} successfully", args.host_path),
+        Err(_) => info!("Directory {:?} already exists", args.host_path),
+    }
+
+    info!("Starting to watch {:?}", path.display());
+    if let Err(ref e) = local::watch(path) {
         error!("error: {:?}", e);
         panic!();
     }
     Ok(())
-});
+}
 
-mod remote {
+pub mod remote {
     use super::errors::*;
     use std::net::TcpStream;
-    use ssh2::Session;
-    use std::env;
     use std::path::Path;
-    use ssh2::{CheckResult, HostKeyType, KnownHostKeyFormat};
-    use ssh2::KnownHostFileKind;
+    use ssh2::{FileStat, Session};
 
-    pub fn connect_with_password(username: &str, password: &str, host: &str) -> Result<Session> {
-        let tcp = TcpStream::connect(host).chain_err(|| {
-            format!("TcpStream is unable to connect to host {:?}", host)
-        })?;
-        // Session::new() returns an Option<Session>, so there is little
-        // error propogation needed.
-        let mut sess = Session::new().unwrap();
-        sess.handshake(&tcp)
-            .chain_err(|| "Session is unable to connect with existing TcpStream")?;
-
-        sess.userauth_password(username, password).chain_err(|| {
-            format!(
-                "Unable to authenticate with username ({:?}) and password ({:?})",
-                username,
-                password
-            )
-        })?;
-        Ok(sess)
+    pub struct Connection {
+        pub stream: TcpStream,
+        pub session: Session,
     }
 
-    pub fn test(host: &str) -> Result<()> {
-        let tcp = TcpStream::connect(host).chain_err(|| {
-            format!("TcpStream is unable to connect to host {:?}", host)
-        })?;
+    impl Connection {
+        pub fn mkdir(&self, dir: &str) -> Result<()> {
+            let dir_name = Path::new(&dir);
+            let ftp = self.session.sftp()?;
+            match self.stat(dir) {
+                Err(_) => ftp.mkdir(dir_name, 0o755).chain_err(|| {
+                    ErrorKind::Mkdir(String::from(dir_name.to_string_lossy()))
+                }),
+                _ => {
+                    Err(ErrorKind::DirectoryExists(String::from(dir_name.to_string_lossy())).into())
+                }
+            }
+        }
+
+        pub fn stat(&self, dir: &str) -> Result<FileStat> {
+            let dir_name = Path::new(&dir);
+            let ftp = self.session.sftp()?;
+            ftp.stat(dir_name).chain_err(|| {
+                ErrorKind::LStat(String::from(dir_name.to_string_lossy()))
+            })
+        }
+    }
+
+    pub fn authenticate_with_agent(host: &str, user: &str) -> Result<Connection> {
+        let tcp =
+            TcpStream::connect(host).chain_err(|| ErrorKind::HostConnection(host.to_string()))?;
         // Session::new() returns an Option<Session>, so there is little
         // error propogation needed.
         let mut session = Session::new().unwrap();
-        session
-            .handshake(&tcp)
-            .chain_err(|| "Session is unable to connect with existing TcpStream")?;
+        session.handshake(&tcp)?;
 
-        let mut known_hosts = session.known_hosts()?;
+        session.userauth_agent(user).chain_err(|| {
+            ErrorKind::UserAuthentication(user.to_string(), host.to_string())
+        })?;
 
-        // Initialize the known hosts with a global known hosts file
-        let file = Path::new(&env::var("HOME").unwrap()).join(".ssh/known_hosts");
-        known_hosts.read_file(&file, KnownHostFileKind::OpenSSH)?;
-
-        // Now check to see if the seesion's host key is anywhere in the known
-        // hosts file
-        let (key, key_type) = session.host_key().unwrap();
-        match known_hosts.check(host, key) {
-            CheckResult::Match => info!("{:?}", key), // all good!
-            CheckResult::NotFound => error!(
-                "session's host key {:?} was not found in the hosts file.",
-                key
-            ),
-            // ok, we'll add it
-            CheckResult::Mismatch => panic!("host mismatch, man in the middle attack?!"),
-            CheckResult::Failure => panic!("failed to check the known hosts"),
-        }
-
-        Ok(())
+        Ok(Connection {
+            stream: tcp,
+            session: session,
+        })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    extern crate ssh2;
-    use ssh2::Session;
-    use super::remote;
-
-    #[test]
-    fn connect_works() {
-        let host = "127.0.0.1:32768";
-        let session: Session = remote::connect_with_password("root", "screencast", host).unwrap();
-        assert!(session.authenticated())
-    }
-
-    fn reverse<T: Clone>(xs: &[T]) -> Vec<T> {
-        let mut rev = vec![];
-        for x in xs {
-            rev.insert(0, x.clone())
-        }
-        rev
-    }
-
-    #[quickcheck]
-    fn double_reversal_is_identity(xs: Vec<isize>) -> bool {
-        xs == reverse(&reverse(&xs))
-    }
-}
-
-mod listener {
+pub mod local {
     use super::errors::*;
-    use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
-    use std::path::{Component, Path};
+
+    use std::fs::File;
+    use std::io::prelude::*;
+    use std::path::{Component, Path, PathBuf};
     use std::sync::mpsc::channel;
+
+    use walkdir::{WalkDir};
+    use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
+    use difference::{Changeset, Difference};
+
+    #[derive(Debug)]
+    pub struct MemoryFile {
+        pub path: PathBuf,
+        pub contents: String,
+    }
 
     pub fn watch(path: &Path) -> Result<()> {
         let (sender, reciever) = channel();
@@ -181,8 +214,59 @@ mod listener {
         loop {
             let event = reciever
                 .recv()
-                .chain_err(|| "Unable to recieve file system event.");
+                .chain_err(|| "Unable to receive file system event.");
             handle_event(event);
+        }
+    }
+
+    pub fn read_env(env_var: &str) -> Result<String> {
+        ::std::env::var(env_var).chain_err(|| ErrorKind::EnviromentRead(env_var.to_string()))
+    }
+
+    pub fn diff<'a>(a: &str, b: &str) -> Option<String> {
+        let changeset = Changeset::new(a, b, " ").diffs;
+        for change in changeset {
+            match change {
+                Difference::Add(s) => return Some(s),
+                _ => (),
+            }
+        }
+        None
+    }
+
+    pub fn read_files_in_dir(path: &str) -> Result<Vec<MemoryFile>> {
+        let mut files = vec!();
+        let walker = WalkDir::new(path).into_iter();
+        for entry in walker
+            .filter_entry(|e| !any_match(e.path(), ".git"))
+            .filter_map(|e| e.ok()) {
+            let path = entry.path().clone();
+            if path.is_file() {
+                let contents = read_file_to_string(path).chain_err(||
+                    ErrorKind::InvalidUTF8(path.to_str().unwrap().to_owned()))?;
+
+                let file = MemoryFile {
+                    path: path.to_owned(),
+                    contents: contents,
+                };
+                files.push(file);
+            }
+        }
+        Ok(files)
+    }
+
+    pub fn read_file_to_string(path: &Path) -> Result<String> {
+        let mut file = File::open(path)?;
+        let mut contents = String::new();
+        file.read_to_string(&mut contents)?;
+        Ok(contents)
+    }
+
+    pub fn format_host_string(host: &str, port: Option<i64>) -> String {
+        if let Some(i) = port {
+            format!("{}:{}", host, i)
+        } else {
+            format!("{}:22", host)
         }
     }
 
@@ -192,8 +276,8 @@ mod listener {
                 path: Some(path),
                 op: Ok(op),
                 cookie,
-            }) => if !is_git_directory(&path) {
-                if !is_target_directory(&path) {
+            }) => if !any_match(&path, ".git") {
+                if !any_match(&path, "target") {
                     info!("Operation: {:?} \n Path: {:?} \n ({:?})", op, path, cookie);
                 }
             },
@@ -202,13 +286,54 @@ mod listener {
         }
     }
 
-    fn is_git_directory(path: &Path) -> bool {
+    pub fn any_match(path: &Path, predicate: &'static str) -> bool {
         path.components()
-            .any(|c: Component| c == Component::Normal(".git".as_ref()))
+            .any(|c: Component| c == Component::Normal(predicate.as_ref()))
+    }
+}
+
+#[cfg(test)]
+mod local_tests {
+    use local::{any_match, diff, format_host_string};
+    use std::path::Path;
+
+    #[test]
+    fn test_format_host_string_with_port() {
+        let original = "random.host".to_owned();
+        let formatted_result = format_host_string(&original, Some(42));
+        assert_eq!(formatted_result, "random.host:42");
     }
 
-    fn is_target_directory(path: &Path) -> bool {
-        path.components()
-            .any(|c: Component| c == Component::Normal("target".as_ref()))
+    #[test]
+    fn test_format_host_string_without_port() {
+        let original = "random.host".to_owned();
+        let formatted_result = format_host_string(&original, None);
+        assert_eq!(formatted_result, "random.host:22");
+    }
+
+    #[test]
+    fn test_format_bad_host_string_with_port() {
+        let original = "random.hostL=::22".to_owned();
+        let formatted_result = format_host_string(&original, None);
+        assert_eq!(formatted_result, "random.hostL=::22:22");
+    }
+
+    #[test]
+    fn diff_diffs() {
+        let a = "/Users/dbarsky/Developer/Rust/fs-sync/";
+        let b = "fs-sync/";
+        assert_eq!(diff(a, b), Some("fs-sync/".to_string()))
+    }
+
+    #[test]
+    fn git_directory_matches_correctly() {
+        let path = Path::new("~/Developer/Rust/fs-sync/.git");
+        assert_eq!(any_match(path, ".git"), true)
+    }
+
+    #[test]
+    fn target_directory_matches_correctly() {
+        let path = Path::new("~/Developer/Rust/fs-sync/");
+        assert_eq!(any_match(path, "Rust"), true)
     }
 }

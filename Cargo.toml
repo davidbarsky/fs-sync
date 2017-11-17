@@ -12,10 +12,8 @@ structopt = "0.1.0"
 structopt-derive = "0.1.0"
 ssh2 = "0.3"
 clippy = {version = "*", optional = true}
-
-[dev-dependencies]
-quickcheck = "0.4.1"
-quickcheck_macros = "0.4.1"
+difference = "1.0"
+walkdir = "2"
 
 [features]
 default = []
