@@ -3,7 +3,7 @@
 
 extern crate difference;
 #[macro_use]
-extern crate error_chain;
+extern crate derive_error_chain;
 #[macro_use]
 extern crate log;
 extern crate loggerv;
@@ -20,58 +20,65 @@ use std::path::Path;
 use cli::Opts;
 
 mod errors {
-    // Create the Error, ErrorKind, ResultExt, and Result types
-    error_chain!{
-        foreign_links {
-            Log(::log::SetLoggerError);
-            Notify(::notify::Error);
-            Ssh(::ssh2::Error);
-            Tcp(::std::io::Error);
-            Env(::std::env::VarError);
-            WalkDir(::walkdir::Error);
-        }
+    #[derive(Debug, ErrorChain)]
+    pub enum ErrorKind {
+        #[error_chain(foreign)]
+        Log(::log::SetLoggerError),
 
-        errors {
-            EnviromentRead(env_variable: String) {
-                description("Failed to read enviroment variable")
-                display("Unable to read enviroment variable `{}`", env_variable)
-            }
+        #[error_chain(foreign)]
+        Notify(::notify::Error),
 
-            HostConnection(host: String) {
-                description("Failed to connect to host")
-                display("Unable to connect to host `{}`", host)
-            }
+        #[error_chain(foreign)]
+        Ssh(::ssh2::Error),
 
-            UserAuthentication(user: String, host: String) {
-                description("Failed to authenticate user with host")
-                display("Unable to authenticate user `{}` with host `{}`", user, host)
-            }
+        #[error_chain(foreign)]
+        Tcp(::std::io::Error),
 
-            Mkdir(path: String) {
-                description("Failed to authenticate create directory")
-                display("Unable to create directory `{}`", path)
-            }
+        #[error_chain(foreign)]
+        Env(::std::env::VarError),
 
-            DirectoryExists(path: String) {
-                description("Failed to create directory")
-                display("Directory `{}` already exists", path)
-            }
+        #[error_chain(foreign)]
+        WalkDir(::walkdir::Error),
 
-            IsDirectory(path: String) {
-                description("Failed to read file")
-                display("Path `{}` is a directory", path)
-            }
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to read enviroment variable""#)]
+        #[error_chain(display = r#"|env_variable| write!(f, "Unable to read enviroment variable `{}`", env_variable)"#)]
+        EnviromentRead(String),
+        
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to create directory""#)]
+        #[error_chain(display = r#"|user, host| write!(f, "Unable to authenticate user `{}` with host `{}`", user, host)"#)]
+        Mkdir(String),
 
-            LStat(path: String) {
-                description("Failed to run lstat")
-                display("Unable to run lstat on path `{}`", path)
-            }
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to connect to host""#)]
+        #[error_chain(display = r#"|host| write!(f, "Unable to connect to host `{}`", host)"#)]
+        HostConnection(String),
 
-            InvalidUTF8(path: String) {
-                description("Stream did not contain valid UTF-8")
-                display("Unable to get a UTF-8 stream for `{}`", path)
-            }
-        }
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to authenticate user with host""#)]
+        #[error_chain(display = r#"|user, host| write!(f, "Unable to authenticate user `{}` with host `{}`", user, host)"#)]
+        UserAuthentication(String, String),
+
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to create directory""#)]
+        #[error_chain(display = r#"|path| write!(f, "Directory `{}` already exists", path)"#)]
+        DirectoryExists(String),
+
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to read file""#)]
+        #[error_chain(display = r#"|path| write!(f, "Path `{}` is a directory", path)"#)]
+        IsDirectory(String),
+
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Failed to run lstat""#)]
+        #[error_chain(display = r#"|path| write!(f, "Failed to run lstat", path)"#)]
+        LStat(String),
+
+        #[error_chain(custom)]
+        #[error_chain(description = r#"|_| "Stream did not contain valid UTF-8""#)]
+        #[error_chain(display = r#"|path| write!(f, "Unable to get a UTF-8 stream for `{}`", path)"#)]
+        InvalidUTF8(String),
     }
 }
 use errors::*;
