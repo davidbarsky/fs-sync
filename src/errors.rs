@@ -37,24 +37,9 @@ error_chain!{
             display("Directory `{}` already exists", path)
         }
 
-        IsDirectory(path: String) {
-            description("Failed to read file")
-            display("Path `{}` is a directory", path)
-        }
-
         LStat(path: String) {
             description("Failed to run lstat")
             display("Unable to run lstat on path `{}`", path)
-        }
-
-        InvalidUTF8(path: String) {
-            description("Stream did not contain valid UTF-8")
-            display("Unable to get a UTF-8 stream for `{}`", path)
-        }
-
-        RelativePathGeneration(directory: String, path: String) {
-            description("Path was not able to be tranformed into a relative one")
-            display("Unable to transform path {} into relative using {}", path, directory)
         }
     }
 }
