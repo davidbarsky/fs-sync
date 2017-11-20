@@ -1,9 +1,13 @@
 #![cfg_attr(feature = "clippy", plugin(clippy))]
-#![recursion_limit="1024"]
+#![feature(conservative_impl_trait)]
+#![recursion_limit = "1024"]
 
 extern crate difference;
 #[macro_use]
 extern crate error_chain;
+extern crate ignore;
+#[macro_use]
+extern crate im as immutable;
 #[macro_use]
 extern crate log;
 extern crate loggerv;
@@ -12,89 +16,38 @@ extern crate ssh2;
 extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
-extern crate walkdir;
 
 use structopt::StructOpt;
-use log::LogLevel;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use cli::Opts;
+use log::LogLevel;
+use immutable::List;
 
-mod errors {
-    // Create the Error, ErrorKind, ResultExt, and Result types
-    error_chain!{
-        foreign_links {
-            Log(::log::SetLoggerError);
-            Notify(::notify::Error);
-            Ssh(::ssh2::Error);
-            Tcp(::std::io::Error);
-            Env(::std::env::VarError);
-            WalkDir(::walkdir::Error);
-        }
+mod local;
+mod remote;
+mod errors;
 
-        errors {
-            EnviromentRead(env_variable: String) {
-                description("Failed to read enviroment variable")
-                display("Unable to read enviroment variable `{}`", env_variable)
-            }
-
-            HostConnection(host: String) {
-                description("Failed to connect to host")
-                display("Unable to connect to host `{}`", host)
-            }
-
-            UserAuthentication(user: String, host: String) {
-                description("Failed to authenticate user with host")
-                display("Unable to authenticate user `{}` with host `{}`", user, host)
-            }
-
-            Mkdir(path: String) {
-                description("Failed to authenticate create directory")
-                display("Unable to create directory `{}`", path)
-            }
-
-            DirectoryExists(path: String) {
-                description("Failed to create directory")
-                display("Directory `{}` already exists", path)
-            }
-
-            IsDirectory(path: String) {
-                description("Failed to read file")
-                display("Path `{}` is a directory", path)
-            }
-
-            LStat(path: String) {
-                description("Failed to run lstat")
-                display("Unable to run lstat on path `{}`", path)
-            }
-
-            InvalidUTF8(path: String) {
-                description("Stream did not contain valid UTF-8")
-                display("Unable to get a UTF-8 stream for `{}`", path)
-            }
-        }
-    }
-}
 use errors::*;
 
 pub mod cli {
     #[derive(StructOpt, Debug)]
-    #[structopt(name = "fs-sync", about = "An example of fs-sync usage.")]
+    #[structopt(name = "fs-sync", about = "fs-sync syncs .")]
     pub struct Opts {
-        /// The file or directory that fs-watch should observe.
-        #[structopt(help = "Path to observe")]
+        /// Watch this directory.
+        #[structopt]
         pub local_path: String,
 
-        /// The ssh host/destination
-        #[structopt(help = "Host to sync to")]
+        /// Sync to this host.
+        #[structopt]
         pub host: String,
 
-        /// The directory that fs-watch should write to.
-        #[structopt(help = "Path that fs-watch should write to.")]
+        /// Write to this directory on remote.
+        #[structopt]
         pub host_path: String,
 
-        /// The port that Opts::host should connect to.
-        #[structopt(short = "-p", long = "port", help = "Port on host to connect to")]
-        pub port: Option<i64>,
+        /// Connect to this post on host.
+        #[structopt(short = "-p", long = "port", default_value = "22")]
+        pub port: i64,
     }
 }
 
@@ -107,13 +60,23 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Opts::from_args();
-    let path = Path::new(&args.local_path);
-    loggerv::init_with_level(LogLevel::Info)?;
+    loggerv::init_with_level(LogLevel::Debug)?;
 
     info!("Starting fs-sync");
     info!("Reading files in {}", args.local_path);
-    let files = local::read_files_in_dir(&args.local_path)?;
-    info!("{:?}", files.len());
+
+    let local_path = Path::new(&args.local_path);
+    let path_list: List<PathBuf> = local::visit_dirs(local_path)?
+        .iter()
+        .map(|e| e.path().to_path_buf())
+        .collect();
+
+    let pairings = paths::zip_local_and_remote(
+        path_list,
+        Path::new(&args.local_path).to_path_buf(),
+        Path::new(&args.host_path).to_path_buf(),
+    );
+    debug!("Pairings: {:?}", pairings);
 
     info!("Connecting to host {:?}", args.host);
     let formatted_host = local::format_host_string(&args.host, args.port);
@@ -126,214 +89,109 @@ fn run() -> Result<()> {
         Err(_) => info!("Directory {:?} already exists", args.host_path),
     }
 
-    info!("Starting to watch {:?}", path.display());
-    if let Err(ref e) = local::watch(path) {
+    info!("Starting to watch {:?}", local_path.display());
+    if let Err(ref e) = local::watch(local_path) {
         error!("error: {:?}", e);
         panic!();
     }
     Ok(())
 }
 
-pub mod remote {
-    use super::errors::*;
-    use std::net::TcpStream;
-    use std::path::Path;
-    use ssh2::{FileStat, Session};
 
-    pub struct Connection {
-        pub stream: TcpStream,
-        pub session: Session,
+pub mod paths {
+    use errors::*;
+    use immutable::{List, Map};
+    use std::path::{Path, PathBuf};
+
+    pub fn generate_remote_path(local_file: PathBuf, remote_directory: PathBuf) -> PathBuf {
+        let mut path = PathBuf::new();
+
+        path.push(remote_directory);
+        path.push(local_file);
+
+        path
     }
 
-    impl Connection {
-        pub fn mkdir(&self, dir: &str) -> Result<()> {
-            let dir_name = Path::new(&dir);
-            let ftp = self.session.sftp()?;
-            match self.stat(dir) {
-                Err(_) => ftp.mkdir(dir_name, 0o755).chain_err(|| {
-                    ErrorKind::Mkdir(String::from(dir_name.to_string_lossy()))
-                }),
-                _ => {
-                    Err(ErrorKind::DirectoryExists(String::from(dir_name.to_string_lossy())).into())
-                }
-            }
+    pub fn strip_prefix(observed_path: &Path, changed_file: &Path) -> Result<PathBuf> {
+        if !observed_path.is_dir() {
+            bail!(format!(
+                "Observed path {:?} is not a directory",
+                observed_path
+            ));
+        }
+        if !changed_file.is_file() {
+            bail!(format!("path {:?} is not a file", changed_file));
         }
 
-        pub fn stat(&self, dir: &str) -> Result<FileStat> {
-            let dir_name = Path::new(&dir);
-            let ftp = self.session.sftp()?;
-            ftp.stat(dir_name).chain_err(|| {
-                ErrorKind::LStat(String::from(dir_name.to_string_lossy()))
-            })
+        let relative = changed_file.strip_prefix(observed_path)?;
+        Ok(relative.to_path_buf())
+    }
+
+
+    pub fn zip_local_and_remote(
+        local_files: List<PathBuf>,
+        local_path: PathBuf,
+        remote_path: PathBuf,
+    ) -> Result<Map<PathBuf, PathBuf>> {
+        debug!("Remote: {:?}", remote_path);
+        let mut map = map!{};
+
+        for p in local_files {
+            let stripped_file = strip_prefix(&local_path, &p)?;
+            let remote_path = generate_remote_path(stripped_file, remote_path.clone());
+            debug!("Remote Path: {:?}", remote_path);
+            map = map.insert(p.to_path_buf(), remote_path);
         }
-    }
 
-    pub fn authenticate_with_agent(host: &str, user: &str) -> Result<Connection> {
-        let tcp =
-            TcpStream::connect(host).chain_err(|| ErrorKind::HostConnection(host.to_string()))?;
-        // Session::new() returns an Option<Session>, so there is little
-        // error propogation needed.
-        let mut session = Session::new().unwrap();
-        session.handshake(&tcp)?;
-
-        session.userauth_agent(user).chain_err(|| {
-            ErrorKind::UserAuthentication(user.to_string(), host.to_string())
-        })?;
-
-        Ok(Connection {
-            stream: tcp,
-            session: session,
-        })
-    }
-}
-
-pub mod local {
-    use super::errors::*;
-
-    use std::fs::File;
-    use std::io::prelude::*;
-    use std::path::{Component, Path, PathBuf};
-    use std::sync::mpsc::channel;
-
-    use walkdir::{WalkDir};
-    use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
-    use difference::{Changeset, Difference};
-
-    #[derive(Debug)]
-    pub struct MemoryFile {
-        pub path: PathBuf,
-        pub contents: String,
-    }
-
-    pub fn watch(path: &Path) -> Result<()> {
-        let (sender, reciever) = channel();
-
-        let mut watcher: RecommendedWatcher = raw_watcher(sender)?;
-        watcher.watch(path, RecursiveMode::Recursive)?;
-
-        loop {
-            let event = reciever
-                .recv()
-                .chain_err(|| "Unable to receive file system event.");
-            handle_event(event);
-        }
-    }
-
-    pub fn read_env(env_var: &str) -> Result<String> {
-        ::std::env::var(env_var).chain_err(|| ErrorKind::EnviromentRead(env_var.to_string()))
-    }
-
-    pub fn diff<'a>(a: &str, b: &str) -> Option<String> {
-        let changeset = Changeset::new(a, b, " ").diffs;
-        for change in changeset {
-            match change {
-                Difference::Add(s) => return Some(s),
-                _ => (),
-            }
-        }
-        None
-    }
-
-    pub fn read_files_in_dir(path: &str) -> Result<Vec<MemoryFile>> {
-        let mut files = vec!();
-        let walker = WalkDir::new(path).into_iter();
-        for entry in walker
-            .filter_entry(|e| !any_match(e.path(), ".git"))
-            .filter_map(|e| e.ok()) {
-            let path = entry.path().clone();
-            if path.is_file() {
-                let contents = read_file_to_string(path).chain_err(||
-                    ErrorKind::InvalidUTF8(path.to_str().unwrap().to_owned()))?;
-
-                let file = MemoryFile {
-                    path: path.to_owned(),
-                    contents: contents,
-                };
-                files.push(file);
-            }
-        }
-        Ok(files)
-    }
-
-    pub fn read_file_to_string(path: &Path) -> Result<String> {
-        let mut file = File::open(path)?;
-        let mut contents = String::new();
-        file.read_to_string(&mut contents)?;
-        Ok(contents)
-    }
-
-    pub fn format_host_string(host: &str, port: Option<i64>) -> String {
-        if let Some(i) = port {
-            format!("{}:{}", host, i)
-        } else {
-            format!("{}:22", host)
-        }
-    }
-
-    fn handle_event(event: Result<RawEvent>) {
-        match event {
-            Ok(RawEvent {
-                path: Some(path),
-                op: Ok(op),
-                cookie,
-            }) => if !any_match(&path, ".git") {
-                if !any_match(&path, "target") {
-                    info!("Operation: {:?} \n Path: {:?} \n ({:?})", op, path, cookie);
-                }
-            },
-            Ok(event) => error!("broken event: {:?}", event),
-            Err(e) => error!("watch error: {:?}", e),
-        }
-    }
-
-    pub fn any_match(path: &Path, predicate: &'static str) -> bool {
-        path.components()
-            .any(|c: Component| c == Component::Normal(predicate.as_ref()))
+        Ok(map)
     }
 }
 
 #[cfg(test)]
-mod local_tests {
-    use local::{any_match, diff, format_host_string};
-    use std::path::Path;
+mod path_tests {
+    use immutable::{List, Map};
+
+    use paths::{generate_remote_path, strip_prefix, zip_local_and_remote};
+    use std::path::{Path, PathBuf};
 
     #[test]
-    fn test_format_host_string_with_port() {
-        let original = "random.host".to_owned();
-        let formatted_result = format_host_string(&original, Some(42));
-        assert_eq!(formatted_result, "random.host:42");
+    fn generate_remote_path_works() {
+        let file = Path::new("src/main.rs").to_path_buf();
+        let directory = Path::new("/local/home/dbarsky/Desktop/test").to_path_buf();
+
+        assert_eq!(
+            generate_remote_path(file, directory),
+            Path::new("/local/home/dbarsky/Desktop/test/src/main.rs").to_path_buf()
+        )
     }
 
     #[test]
-    fn test_format_host_string_without_port() {
-        let original = "random.host".to_owned();
-        let formatted_result = format_host_string(&original, None);
-        assert_eq!(formatted_result, "random.host:22");
+    fn path_is_made_relative() {
+        let watched_path = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/");
+        let file = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/src/main.rs");
+        assert_eq!(
+            strip_prefix(watched_path, file).unwrap(),
+            Path::new("src/main.rs").to_path_buf()
+        )
     }
 
     #[test]
-    fn test_format_bad_host_string_with_port() {
-        let original = "random.hostL=::22".to_owned();
-        let formatted_result = format_host_string(&original, None);
-        assert_eq!(formatted_result, "random.hostL=::22:22");
-    }
+    fn zip_local_and_remote_works() {
+        let a = Path::new("cargo.toml").to_path_buf();
+        let b = Path::new("src/main.rs").to_path_buf();
+        let list = list![a, b];
+        let map_actual = zip_local_and_remote(
+            list,
+            Path::new("/local/home/dbarsky/Desktop/test/").to_path_buf(),
+        );
 
-    #[test]
-    fn diff_diffs() {
-        let a = "/Users/dbarsky/Developer/Rust/fs-sync/";
-        let b = "fs-sync/";
-        assert_eq!(diff(a, b), Some("fs-sync/".to_string()))
-    }
+        let map_comp: Map<PathBuf, PathBuf> = map!{
+            Path::new("cargo.toml").to_path_buf() =>
+                Path::new("/local/home/dbarsky/Desktop/test/cargo.toml").to_path_buf(),
+            Path::new("src/main.rs").to_path_buf() =>
+                Path::new("/local/home/dbarsky/Desktop/test/src/main.rs").to_path_buf()
+        };
 
-    #[test]
-    fn git_directory_matches_correctly() {
-        let path = Path::new("~/Developer/Rust/fs-sync/.git");
-        assert_eq!(any_match(path, ".git"), true)
-    }
-
-    #[test]
-    fn target_directory_matches_correctly() {
-        let path = Path::new("~/Developer/Rust/fs-sync/");
-        assert_eq!(any_match(path, "Rust"), true)
+        assert_eq!(map_actual, map_comp)
     }
 }
