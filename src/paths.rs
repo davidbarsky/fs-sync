@@ -75,18 +75,21 @@ mod path_tests {
 
     #[test]
     fn zip_local_and_remote_works() {
-        let a = Path::new("cargo.toml").to_path_buf();
-        let b = Path::new("src/main.rs").to_path_buf();
+        let a = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/cargo.toml").to_path_buf();
+        let b = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/src/main.rs").to_path_buf();
         let list = list![a, b];
+
+        let watched_path = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/").to_path_buf();
         let map_actual = zip_local_and_remote(
             list,
+            watched_path,
             Path::new("/local/home/dbarsky/Desktop/test/").to_path_buf(),
-        );
+        ).unwrap();
 
         let map_comp: Map<PathBuf, PathBuf> = map!{
-            Path::new("cargo.toml").to_path_buf() =>
+            Path::new("/Users/dbarsky/Developer/Rust/fs-sync/cargo.toml").to_path_buf() =>
                 Path::new("/local/home/dbarsky/Desktop/test/cargo.toml").to_path_buf(),
-            Path::new("src/main.rs").to_path_buf() =>
+            Path::new("/Users/dbarsky/Developer/Rust/fs-sync/src/main.rs").to_path_buf() =>
                 Path::new("/local/home/dbarsky/Desktop/test/src/main.rs").to_path_buf()
         };
 

@@ -2,7 +2,8 @@
 #![feature(conservative_impl_trait)]
 #![recursion_limit = "1024"]
 
-extern crate difference;
+// hello!
+
 #[macro_use]
 extern crate error_chain;
 extern crate ignore;
@@ -18,10 +19,9 @@ extern crate structopt;
 extern crate structopt_derive;
 
 use structopt::StructOpt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use cli::Opts;
 use log::LogLevel;
-use immutable::List;
 
 mod local;
 mod remote;
@@ -32,7 +32,7 @@ use errors::*;
 
 pub mod cli {
     #[derive(StructOpt, Debug)]
-    #[structopt(name = "fs-sync", about = "fs-sync syncs .")]
+    #[structopt(name = "fs-sync", about = "An example of fs-sync usage.")]
     pub struct Opts {
         /// Watch this directory.
         #[structopt]
@@ -61,13 +61,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Opts::from_args();
-    loggerv::init_with_level(LogLevel::Debug)?;
+    loggerv::init_with_level(LogLevel::Info)?;
 
     info!("Starting fs-sync");
     info!("Reading files in {}", args.local_path);
 
     let local_path = Path::new(&args.local_path);
-    let path_list: List<PathBuf> = local::visit_dirs(local_path)?
+    let path_list = local::visit_dirs(local_path)?
         .iter()
         .map(|e| e.path().to_path_buf())
         .collect();
@@ -76,7 +76,7 @@ fn run() -> Result<()> {
         path_list,
         Path::new(&args.local_path).to_path_buf(),
         Path::new(&args.host_path).to_path_buf(),
-    );
+    )?;
     debug!("Pairings: {:?}", pairings);
 
     info!("Connecting to host {:?}", args.host);
@@ -85,15 +85,16 @@ fn run() -> Result<()> {
     let connection = remote::authenticate_with_agent(&formatted_host, &user)?;
 
     info!("Attempting to create directory {:?}", args.host_path);
-    match connection.mkdir(&args.host_path) {
-        Ok(_) => info!("Created directory {:?} successfully", args.host_path),
-        Err(_) => info!("Directory {:?} already exists", args.host_path),
+
+    match connection.initial_sync(pairings.clone()) {
+        Ok(_) => info!("Successfully made an initial sync"),
+        Err(e) => bail!(e),
     }
 
     info!("Starting to watch {:?}", local_path.display());
-    if let Err(ref e) = local::watch(local_path) {
-        error!("error: {:?}", e);
-        panic!();
+    let file_watcher = local::FileWatcher { connection };
+    if let Err(ref e) = file_watcher.watch(local_path, pairings.clone()) {
+        error!("{}", e);
     }
     Ok(())
 }
