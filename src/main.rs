@@ -2,8 +2,6 @@
 #![feature(conservative_impl_trait)]
 #![recursion_limit = "1024"]
 
-// hello!
-
 #[macro_use]
 extern crate error_chain;
 extern crate ignore;
@@ -65,7 +63,6 @@ fn run() -> Result<()> {
 
     info!("Starting fs-sync");
     info!("Reading files in {}", args.local_path);
-
     let local_path = Path::new(&args.local_path);
     let path_list = local::visit_dirs(local_path)?
         .iter()
@@ -77,15 +74,13 @@ fn run() -> Result<()> {
         Path::new(&args.local_path).to_path_buf(),
         Path::new(&args.host_path).to_path_buf(),
     )?;
-    debug!("Pairings: {:?}", pairings);
 
-    info!("Connecting to host {:?}", args.host);
+    info!("Connecting to {:?}", args.host);
     let formatted_host = local::format_host_string(&args.host, args.port);
     let user = local::read_env("USER")?;
     let connection = remote::authenticate_with_agent(&formatted_host, &user)?;
 
     info!("Attempting to create directory {:?}", args.host_path);
-
     match connection.initial_sync(pairings.clone()) {
         Ok(_) => info!("Successfully made an initial sync"),
         Err(e) => bail!(e),

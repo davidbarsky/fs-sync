@@ -50,11 +50,10 @@ impl Connection {
         let contents = read_file_to_string(&local_file)?;
         let byte_contents = contents.as_bytes();
         let size: u64 = fs::metadata(&local_file)?.len();
-        info!("Creating a remote file at {:?}", remote_destination);
+        info!("Writing to {:?}", remote_destination);
         let mut remote_file = self.session
             .scp_send(&remote_destination, 0o755, size, None)?;
 
-        info!("Writing to remote file");
         remote_file.write_all(&byte_contents)?;
         Ok(())
     }

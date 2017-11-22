@@ -61,7 +61,7 @@ impl FileWatcher {
                 op: Ok(op),
                 cookie,
             }) => if file_map.contains_key(&path.to_path_buf()) {
-                info!("Syncing {:?}", path);
+                debug!("Syncing {:?}", path);
                 let remote = &file_map.get(&path).unwrap().to_path_buf();
                 self.connection.sync(&path, remote).unwrap();
             },
