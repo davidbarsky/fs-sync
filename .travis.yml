@@ -6,5 +6,4 @@ rust:
   - nightly
 script:
   - cargo build --verbose --all
-  - cargo run --verbose --example runtest
-  - cargo test --verbose --features "test" --all
+  - cargo test --verbose --all
