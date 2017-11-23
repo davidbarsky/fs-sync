@@ -82,8 +82,8 @@ mod path_tests {
         let watched_path = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/").to_path_buf();
         let map_actual = zip_local_and_remote(
             list,
-            watched_path,
-            Path::new("/local/home/dbarsky/Desktop/test/").to_path_buf(),
+            &watched_path,
+            &Path::new("/local/home/dbarsky/Desktop/test/").to_path_buf(),
         ).unwrap();
 
         let map_comp: Map<PathBuf, PathBuf> = map!{

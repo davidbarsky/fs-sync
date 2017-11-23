@@ -4,7 +4,6 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use ssh2::{FileStat, Session};
 use std::fs;
-use std::thread;
 use failure::Error;
 use immutable::Map;
 
