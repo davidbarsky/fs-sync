@@ -1,9 +1,80 @@
+
+# Based on the "trust" template v0.1.1
+# https://github.com/japaric/trust/tree/v0.1.1
+
+dist: trusty
 language: rust
-os:
-  - linux
-  - osx
-rust:
-  - nightly
+services: docker
+sudo: required
+
+# TODO Rust builds on stable by default, this can be
+# overridden on a case by case basis down below.
+
+env:
+  global:
+    # TODO Update this to match the name of your project.
+    - CRATE_NAME=trust
+
+matrix:
+  # TODO These are all the build jobs. Adjust as necessary. Comment out what you
+  # don't need
+  include:
+    - env: TARGET=x86_64-apple-darwin
+      os: osx
+
+    # Testing other channels
+    - env: TARGET=x86_64-unknown-linux-gnu
+      rust: nightly
+    - env: TARGET=x86_64-apple-darwin
+      os: osx
+      rust: nightly
+
+before_install:
+  - set -e
+  - rustup self update
+
+install:
+  - sh ci/install.sh
+  - source ~/.cargo/env || true
+
 script:
-  - cargo build --verbose --all
-  - cargo test --verbose --all
+  - bash ci/script.sh
+
+after_script: set +e
+
+before_deploy:
+  - sh ci/before_deploy.sh
+
+deploy:
+  provider: releases
+  api_key:
+    secure: S1bF+w4vaU56wo7U0w0BWv4DQZdCYvraZFb+ywy+148k0SK4Un8vZm+gB9c9gDDOKey3/yCQkL0k2il3dLVRLm8AZXh/ScpptecoS4Pm/LYzKvcOgHPxYtEDYM7MD7yH4SeKWsaPwAjInKdWfa2pp7I6XMI0krFPsl06GdRYccPxfXZ0Vx8rXLhk6/N+cAp3U2I0pCYLEQC9/KY0X77ZHYJ14Jpk4SEvDBqHVoLKWQzxZfv5LXcZdJpf79ys/4VUmf0zZT4FZyc9DhMTEpqNVFVUWXgnLp95OqnanrFVg326s2khhvvxRKKgTrvzdei/z659LJJ2BTez+YdVh50QB+doLiTqds2kwrN6J7SUVgyktmOvDEKeeqyJSrqtXZSmH1SPBGnogipnZ1/pI2V0SxvQfVBafxdNMOezbNjlkXmt26T/tN4fc2zW8e9Z4jYDmIBRkBpVxzstGIerlV1Es0A5wm4rSJ9HwS0gc+gosCjtzub2oUV0y3ufFTmF4vprFBcgnw0hJ5kYp4aHl0A7UaQsiCFVJSflaGrkIIFhfYl9hQHq2gd3rUrKh3FT61p+l5erIq9kTd3DMhshBUB/W1uhZTJKlKq76Cm16La5yX1BKF9jFdKpG6XAzkeaq4v8ktK2JiZEkZ3f3RnCijwIgN1htb0FB4TaGD+O8WtP7VQ=
+  on:
+    repo: davidbarsky/fs-sync
+  file_glob: true
+  file: $CRATE_NAME-$TRAVIS_TAG-$TARGET.*
+  on:
+    # TODO Here you can pick which targets will generate binary releases
+    # In this example, there are some targets that are tested using the stable
+    # and nightly channels. This condition makes sure there is only one release
+    # for such targets and that's generated using the stable channel
+    condition: $TRAVIS_RUST_VERSION = nightly
+    tags: true
+    repo: davidbarsky/fs-sync
+  provider: releases
+skip_cleanup: true
+
+cache: cargo
+before_cache:
+  # Travis can't cache files that are not readable by "others"
+  - chmod -R a+r $HOME/.cargo
+
+branches:
+  only:
+    # release tags
+    - /^v\d+\.\d+\.\d+.*$/
+    - master
+
+notifications:
+  email:
+    on_success: never
