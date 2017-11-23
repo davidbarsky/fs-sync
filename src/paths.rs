@@ -1,4 +1,4 @@
-use errors::*;
+use failure::Error;
 use immutable::{List, Map};
 use std::path::{Path, PathBuf};
 
@@ -11,15 +11,15 @@ pub fn generate_remote_path(local_file: PathBuf, remote_directory: PathBuf) -> P
     path
 }
 
-pub fn strip_prefix(observed_path: &Path, changed_file: &Path) -> Result<PathBuf> {
+pub fn strip_prefix(observed_path: &Path, changed_file: &Path) -> Result<PathBuf, Error> {
     if !observed_path.is_dir() {
-        bail!(format!(
+        return Err(format_err!(
             "Observed path {:?} is not a directory",
             observed_path
         ));
     }
     if !changed_file.is_file() {
-        bail!(format!("path {:?} is not a file", changed_file));
+        return Err(format_err!("Path {:?} is not a file", changed_file));
     }
 
     let relative = changed_file.strip_prefix(observed_path)?;
@@ -29,14 +29,14 @@ pub fn strip_prefix(observed_path: &Path, changed_file: &Path) -> Result<PathBuf
 
 pub fn zip_local_and_remote(
     local_files: List<PathBuf>,
-    local_path: PathBuf,
-    remote_path: PathBuf,
-) -> Result<Map<PathBuf, PathBuf>> {
+    local_path: &PathBuf,
+    remote_path: &PathBuf,
+) -> Result<Map<PathBuf, PathBuf>, Error> {
     debug!("Remote: {:?}", remote_path);
     let mut map = map!{};
 
     for p in local_files {
-        let stripped_file = strip_prefix(&local_path, &p)?;
+        let stripped_file = strip_prefix(local_path, &p)?;
         let remote_path = generate_remote_path(stripped_file, remote_path.clone());
         debug!("Remote Path: {:?}", remote_path);
         map = map.insert(p.to_path_buf(), remote_path);
@@ -47,7 +47,7 @@ pub fn zip_local_and_remote(
 
 #[cfg(test)]
 mod path_tests {
-    use immutable::{List, Map};
+    use immutable::Map;
 
     use paths::{generate_remote_path, strip_prefix, zip_local_and_remote};
     use std::path::{Path, PathBuf};

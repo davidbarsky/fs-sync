@@ -1,6 +1,5 @@
-use errors::*;
-
 use immutable::{List, Map};
+use failure::Error;
 use ignore::{DirEntry, Walk};
 use notify::{raw_watcher, RawEvent, RecommendedWatcher, RecursiveMode, Watcher};
 
@@ -11,11 +10,14 @@ use std::sync::mpsc::channel;
 
 use remote::Connection;
 
-pub fn read_env(env_var: &str) -> Result<String> {
-    ::std::env::var(env_var).chain_err(|| ErrorKind::EnviromentRead(env_var.to_string()))
+pub fn read_env(env_var: &str) -> Result<String, Error> {
+    match ::std::env::var(env_var) {
+        Ok(env) => Ok(env),
+        Err(_) => Err(format_err!("Could not read env var: {}", env_var)),
+    }
 }
 
-pub fn visit_dirs(dir: &Path) -> Result<List<DirEntry>> {
+pub fn visit_dirs(dir: &Path) -> Result<List<DirEntry>, Error> {
     let list: List<_> = Walk::new(dir)
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_file())
@@ -24,7 +26,7 @@ pub fn visit_dirs(dir: &Path) -> Result<List<DirEntry>> {
     Ok(list)
 }
 
-pub fn read_file_to_string(path: &Path) -> Result<String> {
+pub fn read_file_to_string(path: &Path) -> Result<String, Error> {
     let mut file = File::open(path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
@@ -40,33 +42,24 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    pub fn watch(&self, path: &Path, file_map: Map<PathBuf, PathBuf>) -> Result<()> {
+    pub fn watch(&self, path: &Path, file_map: &Map<PathBuf, PathBuf>) -> Result<(), Error> {
         let (sender, reciever) = channel();
 
         let mut watcher: RecommendedWatcher = raw_watcher(sender)?;
         watcher.watch(path, RecursiveMode::Recursive)?;
 
         loop {
-            let event = reciever
-                .recv()
-                .chain_err(|| "Unable to receive file system event.");
-            self.handle_event(event, file_map.clone());
+            let event = reciever.recv()?;
+            self.handle_event(event, file_map);
         }
     }
 
-    fn handle_event(&self, event: Result<RawEvent>, file_map: Map<PathBuf, PathBuf>) {
-        match event {
-            Ok(RawEvent {
-                path: Some(path),
-                op: Ok(op),
-                cookie,
-            }) => if file_map.contains_key(&path.to_path_buf()) {
-                debug!("Syncing {:?}", path);
-                let remote = &file_map.get(&path).unwrap().to_path_buf();
-                self.connection.sync(&path, remote).unwrap();
-            },
-            Ok(event) => error!("broken event: {:?}", event),
-            Err(e) => error!("watch error: {:?}", e),
+    fn handle_event(&self, event: RawEvent, file_map: &Map<PathBuf, PathBuf>) {
+        let path = event.path.unwrap();
+        if file_map.contains_key(&path.to_path_buf()) {
+            debug!("Syncing {:?}", path);
+            let remote = &file_map.get(&path).unwrap().to_path_buf();
+            self.connection.sync(&path, remote).unwrap();
         }
     }
 }
@@ -74,8 +67,6 @@ impl FileWatcher {
 #[cfg(test)]
 mod local_tests {
     use super::format_host_string;
-    use std::path::{Path, PathBuf};
-    use immutable::Map;
 
     #[test]
     fn format_host_string_correctly() {

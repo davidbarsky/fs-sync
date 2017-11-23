@@ -3,7 +3,7 @@
 #![recursion_limit = "1024"]
 
 #[macro_use]
-extern crate error_chain;
+extern crate failure;
 extern crate ignore;
 #[macro_use]
 extern crate im as immutable;
@@ -20,13 +20,11 @@ use structopt::StructOpt;
 use std::path::Path;
 use cli::Opts;
 use log::LogLevel;
+use failure::Error;
 
 mod local;
 mod remote;
-mod errors;
 mod paths;
-
-use errors::*;
 
 pub mod cli {
     #[derive(StructOpt, Debug)]
@@ -57,7 +55,7 @@ fn main() {
     }
 }
 
-fn run() -> Result<()> {
+fn run() -> Result<(), Error> {
     let args = Opts::from_args();
     loggerv::init_with_level(LogLevel::Info)?;
 
@@ -71,8 +69,8 @@ fn run() -> Result<()> {
 
     let pairings = paths::zip_local_and_remote(
         path_list,
-        Path::new(&args.local_path).to_path_buf(),
-        Path::new(&args.host_path).to_path_buf(),
+        &Path::new(&args.local_path).to_path_buf(),
+        &Path::new(&args.host_path).to_path_buf(),
     )?;
 
     info!("Connecting to {:?}", args.host);
@@ -83,12 +81,12 @@ fn run() -> Result<()> {
     info!("Attempting to create directory {:?}", args.host_path);
     match connection.initial_sync(pairings.clone()) {
         Ok(_) => info!("Successfully made an initial sync"),
-        Err(e) => bail!(e),
+        Err(e) => return Err(e),
     }
 
     info!("Starting to watch {:?}", local_path.display());
     let file_watcher = local::FileWatcher { connection };
-    if let Err(ref e) = file_watcher.watch(local_path, pairings.clone()) {
+    if let Err(ref e) = file_watcher.watch(local_path, &pairings) {
         error!("{}", e);
     }
     Ok(())
