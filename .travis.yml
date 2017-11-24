@@ -21,12 +21,6 @@ matrix:
   include:
     - env: TARGET=x86_64-apple-darwin
       os: osx
-
-    # Testing other channels
-    - env: TARGET=x86_64-unknown-linux-gnu
-      rust: nightly
-    - env: TARGET=x86_64-apple-darwin
-      os: osx
       rust: nightly
 
 before_install:

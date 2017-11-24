@@ -12,18 +12,8 @@ pub fn generate_remote_path(local_file: PathBuf, remote_directory: PathBuf) -> P
 }
 
 pub fn strip_prefix(observed_path: &Path, changed_file: &Path) -> Result<PathBuf, Error> {
-    if !observed_path.is_dir() {
-        return Err(format_err!(
-            "Observed path {:?} is not a directory",
-            observed_path
-        ));
-    }
-    if !changed_file.is_file() {
-        return Err(format_err!("Path {:?} is not a file", changed_file));
-    }
-
-    let relative = changed_file.strip_prefix(observed_path)?;
-    Ok(relative.to_path_buf())
+    let path = changed_file.strip_prefix(observed_path)?;
+    Ok(path.to_path_buf())
 }
 
 
