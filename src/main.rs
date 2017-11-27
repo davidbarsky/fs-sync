@@ -1,12 +1,9 @@
 #![cfg_attr(feature = "clippy", plugin(clippy))]
 #![feature(conservative_impl_trait)]
-#![recursion_limit = "1024"]
 
 #[macro_use]
 extern crate failure;
 extern crate ignore;
-#[macro_use]
-extern crate im as immutable;
 #[macro_use]
 extern crate log;
 extern crate loggerv;
@@ -16,22 +13,25 @@ extern crate structopt;
 #[macro_use]
 extern crate structopt_derive;
 
+mod local;
+mod remote;
+mod paths;
+mod types;
+
 use structopt::StructOpt;
 use std::path::Path;
 use cli::Opts;
 use log::LogLevel;
 use failure::Error;
-
-mod local;
-mod remote;
-mod paths;
+use remote::Connection;
+use local::FileWatcher;
 
 pub mod cli {
     #[derive(StructOpt, Debug)]
     #[structopt(name = "fs-sync", about = "An example of fs-sync usage.")]
     pub struct Opts {
-        /// Watch this directory.
         #[structopt]
+        /// Watch this directory.
         pub local_path: String,
 
         /// Sync to this host.
@@ -62,31 +62,28 @@ fn run() -> Result<(), Error> {
     info!("Starting fs-sync");
     info!("Reading files in {}", args.local_path);
     let local_path = Path::new(&args.local_path);
-    let path_list = local::visit_dirs(local_path)?
+    let remote_path = Path::new(&args.host_path);
+    let file_list = local::visit_dirs(local_path)?
         .iter()
         .map(|e| e.path().to_path_buf())
         .collect();
 
-    let pairings = paths::zip_local_and_remote(
-        path_list,
-        &Path::new(&args.local_path).to_path_buf(),
-        &Path::new(&args.host_path).to_path_buf(),
-    )?;
+    let pairings = paths::zip_local_and_remote(file_list, local_path, remote_path)?;
 
     info!("Connecting to {:?}", args.host);
     let formatted_host = local::format_host_string(&args.host, args.port);
     let user = local::read_env("USER")?;
-    let connection = remote::authenticate_with_agent(&formatted_host, &user)?;
+    let connection = Connection::new(&formatted_host, &user)?;
 
     info!("Attempting to create directory {:?}", args.host_path);
-    match connection.initial_sync(pairings.clone()) {
+    match connection.initial_sync(&pairings) {
         Ok(_) => info!("Successfully made an initial sync"),
         Err(e) => return Err(e),
     }
 
     info!("Starting to watch {:?}", local_path.display());
-    let file_watcher = local::FileWatcher { connection };
-    if let Err(ref e) = file_watcher.watch(local_path, &pairings) {
+    let file_watcher = FileWatcher::new(connection, local_path, remote_path);
+    if let Err(ref e) = file_watcher.watch(local_path) {
         error!("{}", e);
     }
     Ok(())
