@@ -1,5 +1,4 @@
 #![cfg_attr(feature = "clippy", plugin(clippy))]
-#![feature(conservative_impl_trait)]
 
 #[macro_use]
 extern crate failure;
@@ -82,7 +81,7 @@ fn run() -> Result<(), Error> {
     }
 
     info!("Starting to watch {:?}", local_path.display());
-    let file_watcher = FileWatcher::new(connection, local_path, remote_path);
+    let file_watcher = FileWatcher::new(connection, local_path, remote_path)?;
     if let Err(ref e) = file_watcher.watch(local_path) {
         error!("{}", e);
     }

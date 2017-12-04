@@ -1,12 +1,14 @@
 use failure::Error;
 use ignore::{DirEntry, Walk};
+use ignore::gitignore::{Gitignore, Glob};
+use ignore::Match;
 use notify::{watcher, DebouncedEvent, RecursiveMode, Watcher};
 
 use types::*;
 
 use std::fs::File;
 use std::io::prelude::*;
-use std::path::{Component, Path};
+use std::path::Path;
 use std::sync::mpsc::channel;
 use std::time::Duration;
 
@@ -21,12 +23,14 @@ pub fn read_env(env_var: &str) -> Result<String, Error> {
 }
 
 pub fn visit_dirs(dir: &Path) -> Result<Vec<DirEntry>, Error> {
-    let list: Vec<_> = Walk::new(dir)
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_file())
-        .collect();
-
-    Ok(list)
+    let mut files = vec![];
+    for path in Walk::new(dir) {
+        let path = path?;
+        if path.path().is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 pub fn read_file_to_string(path: &Path) -> Result<String, Error> {
@@ -40,19 +44,93 @@ pub fn format_host_string(host: &str, port: i64) -> String {
     format!("{}:{}", host, port)
 }
 
+#[derive(Debug)]
+pub struct FileBlockList {
+    blocklist: Gitignore,
+}
+
+impl FileBlockList {
+    pub fn new(gitignore_root_path: &LocalPath) -> Result<Self, Error> {
+        let ignore_file: LocalPathBuf = [gitignore_root_path, Path::new(".gitignore")]
+            .iter()
+            .collect();
+
+        let (gitignore, err) = Gitignore::new(ignore_file);
+        if let Some(err) = err {
+            bail!("{}", err)
+        }
+        Ok(FileBlockList {
+            blocklist: gitignore,
+        })
+    }
+
+    pub fn any_match(&self, path: &Path) -> Match<&Glob> {
+        self.blocklist.matched_path_or_any_parents(path, true)
+    }
+
+    pub fn len(&self) -> usize {
+        self.blocklist.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocklist.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod fileblocklist_tests {
+    use std::path::Path;
+    use super::FileBlockList;
+
+    #[test]
+    fn blocklist_accepts_files() {
+        let blocklist = FileBlockList::new(Path::new("/Users/dbarsky/Developer/Rust/fs-sync/"))
+            .expect("Failed to open .gitignore file");
+
+        let arb_path = Path::new("/Users/dbarsky/Developer/Rust/fs-sync/Cargo.toml");
+        let res = blocklist.any_match(arb_path);
+        assert!(res.is_none())
+    }
+
+    #[test]
+    fn blocklist_ignores_files() {
+        let path = Path::new("./test-data/");
+        let blocklist = FileBlockList::new(path).expect("Failed to open .gitignore file");
+
+        let arb_path = Path::new("a/b/c/fs-sync.iml");
+        let res = blocklist.any_match(arb_path);
+        assert!(res.is_ignore());
+    }
+
+    #[test]
+    fn assert_blocklist_has_contents() {
+        let path = Path::new("./test-data");
+        let blocklist = FileBlockList::new(path).expect("Failed to open .gitignore file");
+        assert_eq!(blocklist.len(), 5);
+    }
+}
+
 pub struct FileWatcher {
     pub connection: Connection,
     pub local_directory: LocalPathBuf,
     pub remote_directory: RemotePathBuf,
+    blocklist: FileBlockList,
 }
 
 impl FileWatcher {
-    pub fn new(connection: Connection, local_directory: &Path, remote_directory: &Path) -> Self {
-        FileWatcher {
+    pub fn new(
+        connection: Connection,
+        local_directory: &Path,
+        remote_directory: &Path,
+    ) -> Result<Self, Error> {
+        let blocklist = FileBlockList::new(local_directory)?;
+        println!("{:?}", blocklist);
+        Ok(FileWatcher {
             connection: connection,
             local_directory: local_directory.to_path_buf(),
             remote_directory: remote_directory.to_path_buf(),
-        }
+            blocklist: blocklist,
+        })
     }
 
     pub fn watch(&self, path: &Path) -> Result<(), Error> {
@@ -69,18 +147,18 @@ impl FileWatcher {
 
     fn handle_event(&self, event: DebouncedEvent) -> Result<(), Error> {
         match event {
-            DebouncedEvent::Create(ref path) if !self.any_match(&path, ".git") => {
-                self.write(path.to_owned())
-            }
-            DebouncedEvent::Create(path) => Ok(()),
-            DebouncedEvent::Write(ref path) if !self.any_match(&path, ".git") => {
-                self.write(path.to_owned())
-            }
-            DebouncedEvent::Write(_) => Ok(()),
-            DebouncedEvent::Remove(ref path) if !self.any_match(&path, ".git") => {
-                self.remove(path.to_owned())
-            }
-            DebouncedEvent::Remove(_) => Ok(()),
+            DebouncedEvent::Create(ref path) => match self.blocklist.any_match(&path) {
+                Match::Whitelist(_) | Match::None => self.write(path.to_owned()),
+                Match::Ignore(_) => Ok(()),
+            },
+            DebouncedEvent::Write(ref path) => match self.blocklist.any_match(&path) {
+                Match::Whitelist(_) | Match::None => self.write(path.to_owned()),
+                Match::Ignore(_) => Ok(()),
+            },
+            DebouncedEvent::Remove(ref path) => match self.blocklist.any_match(&path) {
+                Match::Whitelist(_) | Match::None => self.remove(path.to_owned()),
+                Match::Ignore(_) => Ok(()),
+            },
             DebouncedEvent::Rename(old, new) => self.rename(old, new),
             DebouncedEvent::Rescan => Err(format_err!(
                 "A serious error occured while watching this directory",
@@ -112,11 +190,6 @@ impl FileWatcher {
 
     fn full_sync(&self, file_map: &PathMap) -> Result<(), Error> {
         self.connection.initial_sync(file_map)
-    }
-
-    pub fn any_match(&self, path: &LocalPath, predicate: &'static str) -> bool {
-        path.components()
-            .any(|c: Component| c == Component::Normal(predicate.as_ref()))
     }
 }
 

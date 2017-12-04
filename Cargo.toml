@@ -9,11 +9,10 @@ loggerv = "0.4"
 log = "0.3"
 structopt = "0.1.0"
 structopt-derive = "0.1.0"
-failure = "0.1.0"
-failure_derive = "0.1.0"
+failure = "0.1.1"
+failure_derive = "0.1.1"
 ssh2 = "0.3"
 ignore = "0.3"
-newtype-derive = { git = "https://github.com/davidbarsky/newtype-derive.git" }
 
 [features]
 default = []
